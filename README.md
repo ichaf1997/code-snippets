@@ -1,2 +1,14 @@
 # code-snippets
-practical code snippets Record
+Practical Code Snippets Record
+
+## Include Languages
+
+- Python
+
+- Golang
+
+- Bash
+
+- Terraform
+
+- Ansible
