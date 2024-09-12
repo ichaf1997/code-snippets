@@ -1,5 +1,8 @@
-import gitlab
 import argparse
+import requests
+import logging
+import sys
+from dataclasses import dataclass, field
 from typing import (
     Any,
     Dict,
@@ -7,89 +10,107 @@ from typing import (
     Optional,
     Tuple,
     Type,
-    Union,
+    Union
 )
 
-import gitlab.exceptions
+@dataclass
+class Group:
+    name: Optional[str]
+    path: Optional[str]
+    description: Optional[str] = field(default_factory=None)
+    visibility: Optional[str] = field(default_factory='private')
+    parent_id: Optional[int] = field(default_factory=None)
+    default_branch_protection: Optional[int] = field(default_factory=2)
 
+@dataclass
+class Project:
+    name: Optional[str]
+    path: Optional[str]
+    namespace_id: Optional[int]
+    description: Optional[str] = field(default_factory=None)
+    visibility: Optional[str] = field(default_factory='private')
 
-def initGitlab(
-    url: Optional[str] = None,
-    private_token: Optional[str] = None,
-    ssl_verify: Optional[bool] = False
-) -> gitlab.Gitlab:
-    """
-    Initialize a GitLab instance with params.
-    """
-    return gitlab.Gitlab(url, private_token, ssl_verify)
+@dataclass
+class Metadata:
+    groups: Optional[List[Group]] = field(default_factory=list)
+    projects: Optional[List[Project]] = field(default_factory=list)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GitLab Group mirrorer")
-    parser.add_argument("--url", help="GitLab instance URL", required=True)
-    parser.add_argument("--private-token", help="Private token for authentication", required=True)
-    parser.add_argument("--ssl-verify", help="SSL verification (True/False or path to CA certificate)", action='store_true', default=False)
-    parser.add_argument("--source-group-id", help="Source GitLab group ID", required=True)
-    parser.add_argument("--destination-group-name", help="Destination GitLab group Name(if not exist, create automatically)", required=True)
+def config_log(loglevel: int = 20):
+    stdout_handler = logging.StreamHandler(stream=sys.stdout)
+    logging.basicConfig(
+        level=loglevel,
+        format=(
+            "[%(asctime)s] {%(filename)s:%(lineno)d} [%(levelname)s]"
+            " %(message)s"
+        ),
+        handlers=[stdout_handler],
+    )
 
+def GenerateMetadata(SRC_GROUP_ID: str,
+                     DST_GROUP_NAME,
+                     GITLAB_TOKEN,
+                     GITLAB_REPO_URL,
+                     GITLAB_API_VERSION = "v4"
+                     ) -> Metadata:
+    
+    metadata = Metadata()
+    logger.debug(metadata)
+
+    # response = requests.get(
+    #     url = f'{GITLAB_REPO_URL}/api/{GITLAB_API_VERSION}/groups/{SRC_GROUP_ID}',
+    #     headers = {
+    #         'Private-Token': GITLAB_TOKEN
+    #     }
+    # )
+    # if len(response.json()) == 1:
+    #     logger.error(f'Get source group {SRC_GROUP_ID} failed. Response: {response.text}')
+    #     return metadata
+    # return metadata
+    # try:
+    #     response.json()[0]
+    # except:
+    #     logger.error(f'Get subgroups failed. Response: {response.text}')
+    #     return []
+    # return response.json()
+
+def WalkGroups(group_id: str,
+               GITLAB_REPO_URL,
+               GITLAB_API_VERSION,
+               GITLAB_TOKEN,
+               SRC_GROUP_ID,
+               ):
+    response = requests.get(
+        url = f'{GITLAB_REPO_URL}/api/{GITLAB_API_VERSION}/groups/{SRC_GROUP_ID}',
+        headers = {
+            'Private-Token': GITLAB_TOKEN
+        }
+    )  
+
+if __name__ == '__main__':
+    
+    parser = argparse.ArgumentParser(description='Mirror GitLab groups')
+    parser.add_argument('--src-group-id', type=str, help='Source GitLab group ID', required=True)
+    parser.add_argument('--dst-group-name', type=str, help='Destination GitLab group name', required=True)
+    parser.add_argument('--gitlab-token', type=str, help='GitLab private token', required=True)
+    parser.add_argument('--gitlab-repo-url', type=str, help='GitLab API URL', required=True)
+    parser.add_argument('--gitlab-api-version', type=str, help='GitLab API version', default='v4')
+    parser.add_argument('--debug', action="store_true", help='Print Debug Message', default=False)
     args = parser.parse_args()
 
-    gl = initGitlab(args.url, args.private_token, args.ssl_verify)
+    if args.debug:
+        config_log(0)
+    else:
+        config_log()
 
-    try:
-        source_group = gl.groups.get(args.source_group_id)
-        # for p in source_group.projects.list(get_all=True, include_subgroups=True):
-        #     print(p.attributes)
-         
-    except gitlab.exceptions.GitlabGetError as err:
-        print(f"Failed to get source group id: {args.source_group_id}\n {err}")
-        exit(1)
-    
-    # Create Destination Root group
-    try:
-        root_group = gl.groups.create(
-            {
-                "name": args.destination_group_name,
-                "path": args.destination_group_name,
-                "visibility": "private" if source_group.visibility == "internal" else "public",
-                "description": f"Mirror of {source_group.attributes['name']}"  # Source group description will be used as description for mirror group
-            }
-        )
-    except gitlab.exceptions.GitlabCreateError as err:
-        print(f"Failed to create dst group name: {args.destination_group_name}\n {err}")
-        exit(1)
-    # Create Destination Sub groups
-    root_group_id = root_group.attributes['id']
-    for sg in source_group.subgroups.list():
-        try:
-            gl.groups.create({
-                "name": sg.attributes['name'],
-                "path": f"{root_group.attributes['path']}/{sg.attributes['name']}",
-                "parent_id": root_group_id,
-                "visibility": "private" if sg.attributes['visibility'] == "internal" else "public",
-                "description": sg.attributes['description']  # Source subgroup description will be used as description for mirror subgroup
-            })
-            gl.projects.create({
-                "name": sg.attributes['name'],
-                "namespace_id": root_group_id,
-                "path_with_namespace": f"{root_group.attributes['path']}/{sg.attributes['name']}",
-                "description": sg.attributes['description'],
-                "visibility": "private" if sg.attributes['visibility'] == "internal" else "public",
-                "issues_enabled": sg.attributes['issues_enabled'],
-                "merge_requests_enabled": sg.attributes['merge_requests_enabled'],
-                "wiki_enabled": sg.attributes['wiki_enabled'],
-                "snippets_enabled": sg.attributes['snippets_enabled'],
-                "shared_runners_enabled": sg.attributes['shared_runners_enabled'],
-                "allow_merge_on_green_enabled": sg.attributes['allow_merge_on_green_enabled'],
-                "auto_cancel_pending_pushes": sg.attributes['auto_
-            })
-        except gitlab.exceptions.GitlabCreateError as err:
-            print(f"Failed to create subgroup: {sg.attributes['name']}\n {err}")
-            exit(1)
-        
+    logger = logging.getLogger(__name__)
+    logger.debug(f'get arguments: {args.__dict__}')
 
+    metadata = GenerateMetadata(
+        SRC_GROUP_ID = args.src_group_id,
+        DST_GROUP_NAME = args.dst_group_name,
+        GITLAB_TOKEN = args.gitlab_token,
+        GITLAB_REPO_URL = args.gitlab_repo_url,
+        GITLAB_API_VERSION = args.gitlab_api_version
+    )
 
-    # print(gl.groups.get(args.source_group_id).subgroups.list())
-    # print(len(gl.groups.get(args.source_group_id).subgroups.list()))
-
-    # for group in gl.groups.list(all=True):
-    #     if group.attributes['name']
+    # logger.debug(f"Metadata: {metadata}")
