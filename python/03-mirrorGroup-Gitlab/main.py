@@ -1,7 +1,12 @@
 import argparse
-import requests
+import gitlab.exceptions
 import logging
 import sys
+import os
+import shutil
+import gitlab
+import re
+import git
 from dataclasses import dataclass, field
 from typing import (
     Any,
@@ -13,27 +18,13 @@ from typing import (
     Union
 )
 
-@dataclass
-class Group:
-    name: Optional[str]
-    path: Optional[str]
-    description: Optional[str] = field(default_factory=None)
-    visibility: Optional[str] = field(default_factory='private')
-    parent_id: Optional[int] = field(default_factory=None)
-    default_branch_protection: Optional[int] = field(default_factory=2)
-
-@dataclass
-class Project:
-    name: Optional[str]
-    path: Optional[str]
-    namespace_id: Optional[int]
-    description: Optional[str] = field(default_factory=None)
-    visibility: Optional[str] = field(default_factory='private')
-
-@dataclass
-class Metadata:
-    groups: Optional[List[Group]] = field(default_factory=list)
-    projects: Optional[List[Project]] = field(default_factory=list)
+# @dataclass
+# class GitlabAuthentication:
+#     gitlab_token: Optional[str]
+#     gitlab_username: Optional[str]
+#     gitlab_password: Optional[str]
+#     gitlab_repo_url: Optional[str]
+#     gitlab_api_version: Optional[str] = field(default_factory='v4')
 
 def config_log(loglevel: int = 20):
     stdout_handler = logging.StreamHandler(stream=sys.stdout)
@@ -46,45 +37,128 @@ def config_log(loglevel: int = 20):
         handlers=[stdout_handler],
     )
 
-def GenerateMetadata(SRC_GROUP_ID: str,
-                     DST_GROUP_NAME,
-                     GITLAB_TOKEN,
-                     GITLAB_REPO_URL,
-                     GITLAB_API_VERSION = "v4"
-                     ) -> Metadata:
+# def extract_project_name(repo_url)-> str:
+#     match = re.search(r'/([^/]+)\.git$', repo_url)
+#     if match:
+#         return match.group(1)
+#     logger.error(f'unable extract project from repo_url {repo_url}')
+#     sys.exit(1)
+
+def copy_group(
+        src_group_id: str,
+        dst_group_name: str,
+        ga: gitlab.Gitlab
+):
+
+    tmp_dir = os.path.join(os.path.dirname(__file__), '.tmp')
+    try:
+        shutil.rmtree(tmp_dir)
+    except Exception as err:
+        logger.warning(f'Failed to remove directory {tmp_dir}: {err}')
+    os.makedirs(tmp_dir)
+
+    def remote_callback(remote, url, username_from_url, allowed_types):
+        return args.git_username, args.git_password
+
+    def copy_subgroups_and_projects(src_grp, dst_grp):
+        # 复制子组
+        for subgroup in src_grp.subgroups.list():
+            new_subgroup = ga.groups.create({
+                'name': subgroup.name,
+                'path': subgroup.path.lower().replace(' ', '-'),
+                'parent_id': dst_grp.id,
+                'description': subgroup.description,
+                'visibility': 'private',
+                'default_branch_protection': 0
+            })
+            logger.info(f'Create group {new_subgroup.name}\n {new_subgroup.attributes}')
+            copy_subgroups_and_projects(ga.groups.get(subgroup.id), new_subgroup)
+        
+        # 复制项目
+        for project in src_grp.projects.list():
+            src_project = ga.projects.get(project.id)
+            new_project_data = {
+                'name': src_project.name,
+                'path': src_project.path,
+                'namespace_id': dst_grp.id,
+                'description': src_project.description,
+                'visibility': 'private'
+            }
+            new_project = ga.projects.create(new_project_data)
+            logger.info(f'Create project {new_project.name}\n {new_project.attributes}')
+            with git.Git().custom_environment(GIT_ASKPASS=remote_callback):
+                repo_path = os.path.join(tmp_dir, src_project.name)
+                git.Repo.clone_from(
+                    url = src_project.http_url_to_repo, 
+                    to_path = repo_path,
+                    multi_options = [
+                        "--config core.longpaths=true"
+                    ],
+                    allow_unsafe_options = True
+                )
+                repo = git.Repo(repo_path)
+                origin = repo.remote()
+                origin.set_url(new_project.http_url_to_repo)
+                branch = repo.heads['dev']
+                origin.push(
+                    f'dev:master'
+                )
+                new_project.protectedbranches.create({
+                    'name': 'master',
+                    'push_access_level': 0,
+                    'merge_access_level': 40,
+                    'unprotect_access_level': 0
+                })                
+                logger.info(f'push repo {repo_path} to {new_project.http_url_to_repo} barnch -> master')                
+                origin.push(
+                    f'dev:develop'
+                )
+                new_project.protectedbranches.create({
+                    'name': 'develop',
+                    'push_access_level': 0,
+                    'merge_access_level': 30,
+                    'unprotect_access_level': 0
+                })                   
+                logger.info(f'push repo {repo_path} to {new_project.http_url_to_repo} barnch -> develop')
+                origin.push(
+                    f'dev:test'
+                )
+                new_project.protectedbranches.create({
+                    'name': 'test',
+                    'push_access_level': 0,
+                    'merge_access_level': 30,
+                    'unprotect_access_level': 0
+                }) 
+                logger.info(f'push repo {repo_path} to {new_project.http_url_to_repo} barnch -> test')
+                origin.push(
+                    f'dev:reyun'
+                )
+                logger.info(f'push repo {repo_path} to {new_project.http_url_to_repo} barnch -> reyun')
+
+    try:
+        src_group = ga.groups.get(src_group_id)
+        logger.debug(f'Get source group id {src_group_id}\n {src_group.attributes}')
+    except gitlab.exceptions.GitlabGetError as err:
+        logger.error(f'Failed to get source group id: {src_group_id}({err})')
+        return
+
+    try:
+        dst_group = ga.groups.create({
+            'name': dst_group_name,
+            'path': dst_group_name.lower().replace(' ', '-'),
+            'description': f"Copy from {src_group.attributes.get('web_url')}",
+            'visibility': 'private',
+            'default_branch_protection': 0
+        })
+        logger.info(f'Create group {dst_group_name}\n {dst_group.attributes}')
+    except gitlab.exceptions.GitlabCreateError as err:
+        logger.error(f'Failed to create group: {dst_group_name}({err})')
+        return
     
-    metadata = Metadata()
-    logger.debug(metadata)
-
-    # response = requests.get(
-    #     url = f'{GITLAB_REPO_URL}/api/{GITLAB_API_VERSION}/groups/{SRC_GROUP_ID}',
-    #     headers = {
-    #         'Private-Token': GITLAB_TOKEN
-    #     }
-    # )
-    # if len(response.json()) == 1:
-    #     logger.error(f'Get source group {SRC_GROUP_ID} failed. Response: {response.text}')
-    #     return metadata
-    # return metadata
-    # try:
-    #     response.json()[0]
-    # except:
-    #     logger.error(f'Get subgroups failed. Response: {response.text}')
-    #     return []
-    # return response.json()
-
-def WalkGroups(group_id: str,
-               GITLAB_REPO_URL,
-               GITLAB_API_VERSION,
-               GITLAB_TOKEN,
-               SRC_GROUP_ID,
-               ):
-    response = requests.get(
-        url = f'{GITLAB_REPO_URL}/api/{GITLAB_API_VERSION}/groups/{SRC_GROUP_ID}',
-        headers = {
-            'Private-Token': GITLAB_TOKEN
-        }
-    )  
+    copy_subgroups_and_projects(
+        src_grp = src_group, 
+        dst_grp = dst_group
+    )
 
 if __name__ == '__main__':
     
@@ -93,7 +167,8 @@ if __name__ == '__main__':
     parser.add_argument('--dst-group-name', type=str, help='Destination GitLab group name', required=True)
     parser.add_argument('--gitlab-token', type=str, help='GitLab private token', required=True)
     parser.add_argument('--gitlab-repo-url', type=str, help='GitLab API URL', required=True)
-    parser.add_argument('--gitlab-api-version', type=str, help='GitLab API version', default='v4')
+    parser.add_argument('--git-username', type=str, help='Git username', required=True)
+    parser.add_argument('--git-password', type=str, help='Git password', required=True)
     parser.add_argument('--debug', action="store_true", help='Print Debug Message', default=False)
     args = parser.parse_args()
 
@@ -105,12 +180,13 @@ if __name__ == '__main__':
     logger = logging.getLogger(__name__)
     logger.debug(f'get arguments: {args.__dict__}')
 
-    metadata = GenerateMetadata(
-        SRC_GROUP_ID = args.src_group_id,
-        DST_GROUP_NAME = args.dst_group_name,
-        GITLAB_TOKEN = args.gitlab_token,
-        GITLAB_REPO_URL = args.gitlab_repo_url,
-        GITLAB_API_VERSION = args.gitlab_api_version
+    ga = gitlab.Gitlab(
+        url = args.gitlab_repo_url,
+        private_token = args.gitlab_token
     )
 
-    # logger.debug(f"Metadata: {metadata}")
+    copy_group(
+        src_group_id = args.src_group_id,
+        dst_group_name = args.dst_group_name,
+        ga = ga
+    )
