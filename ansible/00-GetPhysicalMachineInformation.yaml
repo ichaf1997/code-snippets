@@ -1,0 +1,48 @@
+---
+- name: Gather physical server information and save to local file
+  hosts: all
+  gather_facts: false
+  ignore_unreachable: true
+
+  tasks:
+    - name: Try to gather system facts
+      setup:
+      register: system_info
+    - name: Get server serial number
+      shell: "dmidecode -s system-serial-number|grep -vE '^#'"
+      register: serial_number
+    - name: Get server product name
+      shell: "dmidecode -s system-product-name|grep -vE '^#'"
+      register: product_number
+    - name: Get disk size
+      shell: "lsblk -b -d -n -o SIZE"
+      register: disk_sizes
+
+    - name: Set default values if unreached
+      set_fact:
+        hostInfo: "{{ inventory_hostname }}|unreachable"
+      when: system_info.unreachable is defined
+
+    - name: Set actual values if reachable
+      block:
+        - name: get actual values
+          set_fact:
+            serial_number: "{{ serial_number.stdout }}"
+            product_number: "{{ product_number.stdout }}"
+            os_version: "{{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+            os_memory: "{{ (ansible_memtotal_mb / 1024) | int }} GB"
+            os_cpu: "{{ ansible_processor_count }} * {{ ansible_processor[2] }}({{ ansible_processor_cores }} cores)"
+            os_disk: "{{ (disk_sizes.stdout_lines | map('int') | sum / (1024**4)) | int }} TB" 
+        - name: get actual values
+          set_fact:
+            hostInfo: "{{ inventory_hostname }}|{{ serial_number }}|{{ product_number }}|{{ os_version }}|{{ os_cpu }}|{{ os_memory }}|{{ os_disk }}"
+      when: system_info.unreachable is not defined
+
+    - name: Add host information to list
+      throttle: 1
+      local_action:
+        module: lineinfile
+        path: "hosts.txt"
+        line: "{{ hostInfo }}"
+        create: true
+      delegate_to: localhost
