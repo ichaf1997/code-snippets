@@ -1,0 +1,23 @@
+---
+- name: Complete DengBao LV3 Linux server base line check
+  hosts: all
+  gather_facts: false
+  vars:
+    logs_save_dir: /tmp/dengbaoV3
+  tasks:
+  - name: Excute Check script
+    # replace DengBao Support script 
+    script: dengbao_servercheck_linux.sh
+    ignore_errors: true
+  - name: Ensure local directory exist
+    local_action:
+      module: file
+      path: "{{ logs_save_dir }}"
+      state: directory 
+    delegate_to: localhost
+  - name: fetch log to control node
+    fetch:
+      src: /tmp/dengbaoV3.log
+      dest: "{{ logs_save_dir }}/{{ ansible_ssh_host }}.log"
+      follow: true
+      flat: true
